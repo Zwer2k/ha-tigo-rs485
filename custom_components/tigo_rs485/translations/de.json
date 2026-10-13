@@ -1,0 +1,47 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tigo RS485 verbinden",
+        "description": "Wähle, wie Home Assistant mit dem RS485-Bus zwischen Tigo CCA und Gateway (TAP) verbunden ist. Auf dem Bus läuft das Tigo-eigene Gateway-Protokoll, kein Modbus.",
+        "data": {
+          "connection_type": "Verbindungsart"
+        }
+      },
+      "connection": {
+        "title": "Verbindungsdaten",
+        "description": "Ein Netzwerk-Wandler muss die RS485-Daten unverändert durchreichen (transparenter Modus, kein Modbus-Gateway-Modus). Einstellungen: 38400 Baud, 8 Datenbits, keine Parität, 1 Stoppbit.",
+        "data": {
+          "serial_port": "Serieller Port",
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung fehlgeschlagen. Bitte prüfe die Einstellungen."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Optimierer benennen",
+        "description": "Gib für jeden Optimierer das Panel-Label aus dem Tigo CCA ein (z. B. `A1`). Nur Optimierer mit Label bekommen Entitäten. Die Entity-IDs lauten dann z. B. `sensor.panel_a1_voltage_in`, wie bei home-assistant-tigo.\n\nErkannte Optimierer (Seriennummer vom Etikett, solange noch unbekannt die Node-ID):\n{optimizers}"
+      }
+    },
+    "error": {
+      "duplicate_label": "Jedes Label darf nur einmal vergeben werden."
+    },
+    "abort": {
+      "no_optimizers": "Es wurden noch keine Optimierer empfangen. Warte, bis Daten vom Bus eintreffen, und versuche es erneut."
+    }
+  },
+  "selector": {
+    "connection_type": {
+      "options": {
+        "serial": "Seriell (USB-RS485-Adapter)",
+        "tcp": "Netzwerk (RS485-zu-TCP-Wandler)"
+      }
+    }
+  }
+}

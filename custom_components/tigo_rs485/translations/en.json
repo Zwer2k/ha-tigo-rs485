@@ -1,0 +1,47 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Tigo RS485",
+        "description": "Choose how Home Assistant is connected to the RS485 bus between the Tigo CCA and the gateway (TAP). The bus uses Tigo's own gateway protocol, not Modbus.",
+        "data": {
+          "connection_type": "Connection type"
+        }
+      },
+      "connection": {
+        "title": "Connection details",
+        "description": "For a network converter, it must forward the raw RS485 data unchanged (transparent mode, not Modbus gateway mode). Settings: 38400 baud, 8 data bits, no parity, 1 stop bit.",
+        "data": {
+          "serial_port": "Serial port",
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect. Check your settings."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Label optimizers",
+        "description": "Enter the panel label from the Tigo CCA for each optimizer (for example `A1`). Only labeled optimizers get entities. The entity IDs are for example `sensor.panel_a1_voltage_in`, like in home-assistant-tigo.\n\nDiscovered optimizers (serial number from the label, or the node ID while it is unknown):\n{optimizers}"
+      }
+    },
+    "error": {
+      "duplicate_label": "Each label can only be used once."
+    },
+    "abort": {
+      "no_optimizers": "No optimizers received yet. Wait until data arrives from the bus and try again."
+    }
+  },
+  "selector": {
+    "connection_type": {
+      "options": {
+        "serial": "Serial (USB-RS485 adapter)",
+        "tcp": "Network (RS485-to-TCP converter)"
+      }
+    }
+  }
+}
