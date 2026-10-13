@@ -1,0 +1,20 @@
+{
+  "domain": "tigo_rs485",
+  "name": "Tigo RS485",
+  "codeowners": [
+    "@Zwer2k"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/Zwer2k/ha-tigo-rs485#readme",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/Zwer2k/ha-tigo-rs485/issues",
+  "loggers": [
+    "tappipe"
+  ],
+  "requirements": [
+    "tappipe==0.0.5",
+    "pyserial==3.5"
+  ],
+  "version": "1.0.0"
+}
