@@ -4,6 +4,7 @@ import logging
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import partial
 import struct
 from typing import Any
@@ -32,12 +33,18 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     CoordinatorEntity,
 )
 from .barcode import barcode
-from .const import CONF_LABELS, DOMAIN
+from .const import (
+    CONF_LABELS,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+)
 
 CONF_CONNECTION_TYPE = "connection_type"
 CONF_SERIAL_PORT = "serial_port"
@@ -53,6 +60,15 @@ STORAGE_VERSION = 1
 # All Tigo long addresses start with this prefix
 ADDRESS_PREFIX = bytes((0x04, 0xC0, 0x5B))
 ADDRESS_PREFIX_TEXT = "04:C0:5B"
+# Optimizers report every few seconds while the panel produces power. Without
+# light they lose power and stop reporting, so the last values would remain
+IDLE_TIMEOUT = timedelta(minutes=2)
+IDLE_CHECK_INTERVAL = timedelta(seconds=30)
+# Report values that are averaged over the update interval, all others are
+# taken from the latest report
+AVERAGED_KEYS = ("vin", "vout", "ampsin", "power", "temp")
+# Raw byte values, averaged and rounded to whole numbers
+AVERAGED_RAW_KEYS = ("duty", "rssi")
 
 
 def _check_crc(self) -> bool:
@@ -76,13 +92,27 @@ class TigoSensorEntityDescription(SensorEntityDescription):
     """Describes a Tigo optimizer sensor."""
 
     value_fn: Callable[[dict[str, Any]], StateType]
+    # Value while the optimizer does not report, None for unknown
+    idle_value: StateType = None
 
 
 def _power(data: dict[str, Any]) -> float | None:
     """Return the input power of an optimizer."""
-    if data.get("vin") is None or data.get("ampsin") is None:
+    if data.get("power") is None:
         return None
-    return round(data["vin"] * data["ampsin"], 2)
+    return round(data["power"], 2)
+
+
+def _average(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the latest report with the measured values averaged."""
+    result = dict(reports[-1])
+    for key in AVERAGED_KEYS + AVERAGED_RAW_KEYS:
+        values = [value for report in reports if (value := report.get(key)) is not None]
+        if not values:
+            continue
+        mean = sum(values) / len(values)
+        result[key] = round(mean) if key in AVERAGED_RAW_KEYS else mean
+    return result
 
 
 def _rounded(key: str, digits: int) -> Callable[[dict[str, Any]], float | None]:
@@ -95,6 +125,7 @@ def _rounded(key: str, digits: int) -> Callable[[dict[str, Any]], float | None]:
 OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     TigoSensorEntityDescription(
         key="voltage_in",
+        idle_value=0,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -103,6 +134,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="voltage_out",
+        idle_value=0,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -111,6 +143,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="current",
+        idle_value=0,
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
@@ -119,6 +152,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="power",
+        idle_value=0,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -306,6 +340,13 @@ class TigoCoordinator(DataUpdateCoordinator):
         # assigned to them keep working until the options are saved again
         self.legacy_keys: dict[str, int] = {}
         self.optimizer_data: dict[int, dict[str, Any]] = {}  # node ID -> report
+        self.last_report: dict[int, float] = {}  # node ID -> monotonic time
+        self.idle_nodes: set[int] = set()
+        self.update_interval_seconds: int = entry.options.get(
+            CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+        )
+        # Reports received since the last write, node ID -> reports
+        self._pending: dict[int, list[dict[str, Any]]] = {}
         self.reader = None
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
@@ -353,8 +394,56 @@ class TigoCoordinator(DataUpdateCoordinator):
 
     @callback
     def _on_data(self, node_id: int, data: dict[str, Any]) -> None:
+        # Power is calculated per report, so the average stays correct
+        if data.get("vin") is not None and data.get("ampsin") is not None:
+            data = {**data, "power": data["vin"] * data["ampsin"]}
+        self.last_report[node_id] = self.hass.loop.time()
+        # Write every report, or the first one so new optimizers show up
+        if not self.update_interval_seconds or node_id not in self.optimizer_data:
+            self._set_node_data(node_id, data)
+            self.async_set_updated_data(self.optimizer_data)
+            return
+        self._pending.setdefault(node_id, []).append(data)
+
+    @callback
+    def _set_node_data(self, node_id: int, data: dict[str, Any]) -> None:
+        """Store the values of an optimizer that will be written next."""
         self.optimizer_data[node_id] = data
+        if node_id in self.idle_nodes:
+            self.idle_nodes.discard(node_id)
+            _LOGGER.debug("Optimizer node ID %s reports again", node_id)
+
+    @callback
+    def _write_averages(self, _now: Any = None) -> None:
+        """Write the values averaged over the update interval."""
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, {}
+        for node_id, reports in pending.items():
+            self._set_node_data(node_id, _average(reports))
         self.async_set_updated_data(self.optimizer_data)
+
+    @callback
+    def _check_idle(self, _now: Any = None) -> None:
+        """Mark optimizers that stopped reporting, e.g. after sunset."""
+        deadline = self.hass.loop.time() - IDLE_TIMEOUT.total_seconds()
+        idle = {
+            node_id
+            for node_id, last in self.last_report.items()
+            if last < deadline and node_id not in self.idle_nodes
+        }
+        if not idle:
+            return
+        _LOGGER.debug("Optimizer node IDs %s stopped reporting", sorted(idle))
+        self.idle_nodes |= idle
+        # Averages of the last reports would mark them as active again
+        for node_id in idle:
+            self._pending.pop(node_id, None)
+        self.async_update_listeners()
+
+    def is_idle(self, node_id: int) -> bool:
+        """Return if the optimizer stopped reporting."""
+        return node_id in self.idle_nodes
 
     @callback
     def _on_address(self, node_id: int, address: bytes) -> None:
@@ -401,6 +490,17 @@ class TigoCoordinator(DataUpdateCoordinator):
                 self.entry.data[CONF_SERIAL_PORT], self._on_data, self._on_address
             )
         await self.reader.start()
+        self.entry.async_on_unload(
+            async_track_time_interval(self.hass, self._check_idle, IDLE_CHECK_INTERVAL)
+        )
+        if self.update_interval_seconds:
+            self.entry.async_on_unload(
+                async_track_time_interval(
+                    self.hass,
+                    self._write_averages,
+                    timedelta(seconds=self.update_interval_seconds),
+                )
+            )
 
     async def async_stop(self) -> None:
         """Stop reading and save the known addresses."""
@@ -552,6 +652,10 @@ class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
     @property
     def native_value(self) -> StateType:
         """Return the value of this sensor."""
-        if (data := self._data) is None:
+        if (node_id := self.coordinator.node_for(self._label)) is None:
+            return None
+        if self.coordinator.is_idle(node_id):
+            return self.entity_description.idle_value
+        if (data := self.coordinator.optimizer_data.get(node_id)) is None:
             return None
         return self.entity_description.value_fn(data)

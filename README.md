@@ -25,6 +25,35 @@ You need one of these, connected in parallel to the RS485 wires (A/B) between th
 
 Serial settings: 38400 baud, 8 data bits, no parity, 1 stop bit.
 
+### Wiring
+
+The adapter is connected in parallel to the existing cable between the CCA and the TAP, for example directly at the gateway terminals of the CCA. The cable to the TAP stays connected.
+
+```text
+ ┌───────────────────┐                        ┌───────────────────┐
+ │    Tigo CCA       │                        │     Tigo TAP      │
+ │  gateway terminal │                        │    (gateway)      │
+ │                   │                        │                   │
+ │              +  ●─┼────────────────────────┼─● +               │
+ │              A  ●─┼──────────┬─────────────┼─● A               │
+ │              B  ●─┼──────────┼──┬──────────┼─● B               │
+ │            GND  ●─┼──────────┼──┼──┬───────┼─● GND             │
+ └───────────────────┘          │  │  │       └───────────────────┘
+                                │  │  │
+                         ┌──────●──●──●──────┐
+                         │      A  B GND     │
+                         │ USB-RS485 adapter │       ┌────────────────┐
+                         │ or RS485-to-TCP   ├───────┤ Home Assistant │
+                         │ converter         │  USB  └────────────────┘
+                         └───────────────────┘ or LAN
+```
+
+- Connect **A to A** and **B to B**. If no data arrives, swap A and B: some manufacturers label them the other way round.
+- Connect **GND** if the adapter has a GND terminal. It gives both sides the same reference and makes the reception more reliable.
+- Do **not** connect the supply wire (`+`) to the adapter. It powers the TAP.
+- Do **not** enable a termination resistor on the adapter. The adapter is only an extra listener on the bus.
+- Keep the wires from the bus to the adapter short.
+
 ## Setup
 
 1. Go to **Settings** → **Devices & services** → **Add integration** and search for "Tigo RS485".
@@ -34,7 +63,24 @@ Serial settings: 38400 baud, 8 data bits, no parity, 1 stop bit.
 3. Wait until the optimizers send data. This usually takes a few seconds while the panels produce power.
 4. Open the integration options (**Configure**) and enter a label for each optimizer, for example `A1`. Only optimizers with a label get entities.
 
-The options list each optimizer by the serial number printed on its label (for example `4-9A57A2L`), together with its current voltage and current. Until the serial number is known, the node ID assigned by the gateway is shown instead. The serial number is learned from topology reports and node tables on the bus; restarting the CCA makes it send a full node table.
+The options list each optimizer by the serial number printed on its label (for example `4-9A57A2L`), together with its current voltage and current. Until the serial number is known, the node ID assigned by the gateway is shown instead.
+
+### When do the serial numbers appear?
+
+The power reports only contain the node ID, not the serial number. The serial number is calculated from the long address of the optimizer, which only appears in two kinds of messages on the bus:
+
+- **Topology reports:** each optimizer sends them on its own from time to time, while its panel produces power. In a system with 16 optimizers, the serial numbers of all optimizers were known after less than 30 minutes, without restarting the CCA.
+- **Node table:** a complete list of all optimizers. The CCA requests it when it starts. It is not verified yet that a restart of the CCA reliably triggers it.
+
+**You do not need to disconnect the CCA from power.** Wait until the serial numbers appear in the options, during the day while the panels produce power. If you do not want to wait, you can try restarting the CCA.
+
+The integration stores the serial numbers, so they are available right away after restarting Home Assistant. You can already assign labels by node ID before the serial number is known. They are kept when the serial number appears.
+
+### Update interval
+
+The optimizers report every few seconds, which leads to many state writes. In the options, you can choose an update interval of up to 10 minutes. The values are then averaged over that time and written once. The default is to write every report as it arrives.
+
+When an optimizer stops reporting for 2 minutes, for example after sunset, its voltage, current and power sensors change to `0` and the other sensors to unknown.
 
 ## Entities
 

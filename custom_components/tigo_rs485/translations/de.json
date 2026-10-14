@@ -25,15 +25,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Optimierer benennen",
-        "description": "Gib für jeden Optimierer das Panel-Label aus dem Tigo CCA ein (z. B. `A1`). Nur Optimierer mit Label bekommen Entitäten. Die Entity-IDs lauten dann z. B. `sensor.panel_a1_voltage_in`, wie bei home-assistant-tigo.\n\nErkannte Optimierer (Seriennummer vom Etikett, solange noch unbekannt die Node-ID):\n{optimizers}"
+        "title": "Optionen",
+        "description": "Gib für jeden Optimierer das Panel-Label aus dem Tigo CCA ein (z. B. `A1`). Nur Optimierer mit Label bekommen Entitäten. Die Entity-IDs lauten dann z. B. `sensor.panel_a1_voltage_in`, wie bei home-assistant-tigo.\n\nErkannte Optimierer (Seriennummer vom Etikett, solange noch unbekannt die Node-ID):\n{optimizers}",
+        "data": {
+          "update_interval": "Aktualisierungsintervall"
+        },
+        "data_description": {
+          "update_interval": "Die Optimierer melden sich alle paar Sekunden. Bei einem längeren Intervall werden die Werte über diese Zeit gemittelt und nur einmal geschrieben. Das reduziert die Schreibvorgänge in die Datenbank."
+        }
       }
     },
     "error": {
       "duplicate_label": "Jedes Label darf nur einmal vergeben werden."
     },
     "abort": {
-      "no_optimizers": "Es wurden noch keine Optimierer empfangen. Warte, bis Daten vom Bus eintreffen, und versuche es erneut."
+      "not_loaded": "Die Integration ist nicht geladen. Prüfe die Verbindung und versuche es erneut."
     }
   },
   "selector": {
@@ -41,6 +47,17 @@
       "options": {
         "serial": "Seriell (USB-RS485-Adapter)",
         "tcp": "Netzwerk (RS485-zu-TCP-Wandler)"
+      }
+    },
+    "update_interval": {
+      "options": {
+        "0": "Jeder Bericht",
+        "10": "10 Sekunden",
+        "30": "30 Sekunden",
+        "60": "1 Minute",
+        "120": "2 Minuten",
+        "300": "5 Minuten",
+        "600": "10 Minuten"
       }
     }
   }
