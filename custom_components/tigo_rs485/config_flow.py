@@ -14,7 +14,13 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
 )
-from .const import CONF_LABELS, DOMAIN
+from .const import (
+    CONF_LABELS,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+    UPDATE_INTERVALS,
+)
 
 BY_ID_DIR = "/dev/serial/by-id"
 DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
@@ -143,11 +149,14 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
     """Assign panel labels to the discovered optimizers."""
 
     async def async_step_init(self, user_input=None):
-        """Show one label field per known optimizer."""
+        """Show the update interval and one label field per known optimizer."""
         old_labels: dict[str, str] = self.config_entry.options.get(CONF_LABELS, {})
+        update_interval: int = self.config_entry.options.get(
+            CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+        )
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         if coordinator is None:
-            return self.async_abort(reason="no_optimizers")
+            return self.async_abort(reason="not_loaded")
 
         # One field per optimizer, keyed by its long address once known
         node_ids = sorted(set(coordinator.optimizer_data) | set(coordinator.addresses))
@@ -164,11 +173,10 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
             if key not in keys and label not in labels.values():
                 keys[key] = None
                 labels[key] = label
-        if not keys:
-            return self.async_abort(reason="no_optimizers")
 
         errors: dict[str, str] = {}
         if user_input is not None:
+            update_interval = int(user_input[CONF_UPDATE_INTERVAL])
             new_labels = {
                 key: label
                 for key in keys
@@ -177,7 +185,12 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
             if len(set(new_labels.values())) != len(new_labels):
                 errors["base"] = "duplicate_label"
             else:
-                return self.async_create_entry(data={CONF_LABELS: new_labels})
+                return self.async_create_entry(
+                    data={
+                        CONF_LABELS: new_labels,
+                        CONF_UPDATE_INTERVAL: update_interval,
+                    }
+                )
             labels = new_labels
 
         # List what is known about each optimizer to help identify it
@@ -194,13 +207,26 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
             if node_id is None or not data:
                 details.append("no data yet")
             lines.append("- " + ", ".join(details))
+        if not lines:
+            lines.append("- none yet")
 
         schema = vol.Schema(
             {
-                vol.Optional(
-                    key, description={"suggested_value": labels.get(key, "")}
-                ): str
-                for key in keys
+                vol.Required(
+                    CONF_UPDATE_INTERVAL, default=str(update_interval)
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[str(seconds) for seconds in UPDATE_INTERVALS],
+                        translation_key=CONF_UPDATE_INTERVAL,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **{
+                    vol.Optional(
+                        key, description={"suggested_value": labels.get(key, "")}
+                    ): str
+                    for key in keys
+                },
             }
         )
         return self.async_show_form(

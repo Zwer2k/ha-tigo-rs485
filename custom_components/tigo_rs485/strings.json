@@ -25,15 +25,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Label optimizers",
-        "description": "Enter the panel label from the Tigo CCA for each optimizer (for example `A1`). Only labeled optimizers get entities. The entity IDs are for example `sensor.panel_a1_voltage_in`, like in home-assistant-tigo.\n\nDiscovered optimizers (serial number from the label, or the node ID while it is unknown):\n{optimizers}"
+        "title": "Options",
+        "description": "Enter the panel label from the Tigo CCA for each optimizer (for example `A1`). Only labeled optimizers get entities. The entity IDs are for example `sensor.panel_a1_voltage_in`, like in home-assistant-tigo.\n\nDiscovered optimizers (serial number from the label, or the node ID while it is unknown):\n{optimizers}",
+        "data": {
+          "update_interval": "Update interval"
+        },
+        "data_description": {
+          "update_interval": "The optimizers report every few seconds. With a longer interval, the values are averaged over that time and written once, which reduces the writes to the database."
+        }
       }
     },
     "error": {
       "duplicate_label": "Each label can only be used once."
     },
     "abort": {
-      "no_optimizers": "No optimizers received yet. Wait until data arrives from the bus and try again."
+      "not_loaded": "The integration is not loaded. Check the connection and try again."
     }
   },
   "selector": {
@@ -41,6 +47,17 @@
       "options": {
         "serial": "Serial (USB-RS485 adapter)",
         "tcp": "Network (RS485-to-TCP converter)"
+      }
+    },
+    "update_interval": {
+      "options": {
+        "0": "Every report",
+        "10": "10 seconds",
+        "30": "30 seconds",
+        "60": "1 minute",
+        "120": "2 minutes",
+        "300": "5 minutes",
+        "600": "10 minutes"
       }
     }
   }
