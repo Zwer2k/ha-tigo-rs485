@@ -110,6 +110,8 @@ The CCA temperature and the panel `status` and `online` values of home-assistant
 
 ## Troubleshooting
 
+When the connection to the adapter or converter is lost, for example because `ser2net` or the converter restarts, the integration connects again on its own. While it is disconnected, the entities are unavailable. A TCP connection that receives no data for 60 seconds is opened again, because the CCA polls the gateway all the time.
+
 To see the received power reports and node table updates, enable debug logging:
 
 ```yaml
