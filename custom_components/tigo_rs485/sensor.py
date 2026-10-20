@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -69,6 +70,14 @@ IDLE_CHECK_INTERVAL = timedelta(seconds=30)
 AVERAGED_KEYS = ("vin", "vout", "ampsin", "power", "temp")
 # Raw byte values, averaged and rounded to whole numbers
 AVERAGED_RAW_KEYS = ("duty", "rssi")
+# Wait time before connecting again after the connection failed, doubled
+# after each failed attempt up to the maximum
+RECONNECT_DELAY_MIN = 5
+RECONNECT_DELAY_MAX = 60
+# The CCA polls the gateway all the time, so a TCP connection without any
+# data is most likely dead (for example after the converter rebooted
+# without closing the connection) and is opened again
+TCP_READ_TIMEOUT = 60
 
 
 def _check_crc(self) -> bool:
@@ -186,12 +195,14 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
 class TappipeReaderBase:
     """Abstract base for Tappipe readers (serial or TCP)."""
 
-    def __init__(self, data_callback, address_callback):
+    def __init__(self, data_callback, address_callback, connection_callback):
         self._data_callback = data_callback
         self._address_callback = address_callback
+        self._connection_callback = connection_callback
         self._buffer = bytearray()
         self._running = False
         self._task = None
+        self._connected = False
 
     async def start(self):
         self._running = True
@@ -206,8 +217,72 @@ class TappipeReaderBase:
             except asyncio.CancelledError:
                 pass
 
-    async def _read_loop(self):
+    @property
+    def name(self) -> str:
+        """Return the port or host used in log messages."""
         raise NotImplementedError
+
+    async def _connect(self) -> None:
+        """Open the connection."""
+        raise NotImplementedError
+
+    async def _read(self) -> bytes:
+        """Return the next received bytes, raise OSError if the connection is lost."""
+        raise NotImplementedError
+
+    async def _disconnect(self) -> None:
+        """Close the connection."""
+        raise NotImplementedError
+
+    def _set_connected(self, connected: bool) -> None:
+        """Log and report changes of the connection state."""
+        if connected == self._connected:
+            return
+        self._connected = connected
+        if connected:
+            _LOGGER.info("Connected to %s", self.name)
+        self._connection_callback(connected)
+
+    async def _read_loop(self) -> None:
+        """Read from the bus and connect again whenever the connection is lost."""
+        delay = RECONNECT_DELAY_MIN
+        warned = False  # Log only once until the connection works again
+        while self._running:
+            try:
+                await self._connect()
+            except OSError as err:
+                if not warned:
+                    _LOGGER.warning("Cannot connect to %s: %s", self.name, err)
+                    warned = True
+                self._set_connected(False)
+                _LOGGER.debug("Connecting again in %s seconds", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, RECONNECT_DELAY_MAX)
+                continue
+
+            delay = RECONNECT_DELAY_MIN
+            warned = False
+            self._buffer.clear()
+            self._set_connected(True)
+            try:
+                while self._running:
+                    data = await self._read()
+                    try:
+                        self._process_data(data)
+                    except Exception:
+                        _LOGGER.exception("Error while processing received data")
+            except TimeoutError:
+                # Only reported as lost if connecting again fails
+                _LOGGER.debug("No data from %s, connecting again", self.name)
+                continue
+            except OSError as err:
+                _LOGGER.warning("Connection to %s lost: %s", self.name, err)
+                warned = True
+                self._set_connected(False)
+            finally:
+                await self._disconnect()
+            # Give the converter or adapter time to come back
+            await asyncio.sleep(delay)
 
     def _process_data(self, data):
         """Buffer received bytes and handle all complete frames."""
@@ -263,20 +338,22 @@ class TappipeReaderBase:
 
 
 class TappipeSerialReader(TappipeReaderBase):
-    def __init__(self, port, data_callback, address_callback):
-        super().__init__(data_callback, address_callback)
+    """Read from a USB-RS485 adapter."""
+
+    def __init__(self, port, data_callback, address_callback, connection_callback):
+        """Initialize the reader."""
+        super().__init__(data_callback, address_callback, connection_callback)
         self._port = port
         self._serial = None
 
-    async def stop(self):
-        await super().stop()
-        if self._serial:
-            self._serial.close()
-            self._serial = None
+    @property
+    def name(self) -> str:
+        """Return the serial port."""
+        return self._port
 
-    async def _read_loop(self):
-        loop = asyncio.get_running_loop()
-        self._serial = await loop.run_in_executor(
+    async def _connect(self) -> None:
+        """Open the serial port."""
+        self._serial = await asyncio.get_running_loop().run_in_executor(
             None,
             partial(
                 serial.Serial,
@@ -287,34 +364,61 @@ class TappipeSerialReader(TappipeReaderBase):
                 stopbits=serial.STOPBITS_ONE,
             ),
         )
-        _LOGGER.info("Serial connection to %s established successfully", self._port)
-        while self._running:
-            data = await loop.run_in_executor(None, self._serial.read, 256)
-            try:
-                self._process_data(data)
-            except Exception:
-                _LOGGER.exception("Error while processing received data")
+
+    async def _read(self) -> bytes:
+        """Return the bytes received within the read timeout."""
+        # SerialException is an OSError, for example when the adapter is unplugged
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._serial.read, 256
+        )
+
+    async def _disconnect(self) -> None:
+        """Close the serial port."""
+        if self._serial:
+            self._serial.close()
+            self._serial = None
 
 
 # Raw byte stream from an RS485-to-TCP converter. The bus carries Tigo's
 # own gateway protocol, not Modbus, so the converter must pass bytes through
 class TappipeTCPReader(TappipeReaderBase):
-    def __init__(self, host, port, data_callback, address_callback):
-        super().__init__(data_callback, address_callback)
+    """Read from an RS485-to-TCP converter."""
+
+    def __init__(
+        self, host, port, data_callback, address_callback, connection_callback
+    ):
+        """Initialize the reader."""
+        super().__init__(data_callback, address_callback, connection_callback)
         self._host = host
         self._port = port
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
 
-    async def _read_loop(self):
-        reader, _ = await asyncio.open_connection(self._host, self._port)
-        while self._running:
-            data = await reader.read(256)
-            if not data:
-                _LOGGER.warning("TCP connection closed by remote side")
-                break
-            try:
-                self._process_data(data)
-            except Exception:
-                _LOGGER.exception("Error while processing received data")
+    @property
+    def name(self) -> str:
+        """Return host and port of the converter."""
+        return f"{self._host}:{self._port}"
+
+    async def _connect(self) -> None:
+        """Open the TCP connection."""
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self._host, self._port), TCP_READ_TIMEOUT
+        )
+
+    async def _read(self) -> bytes:
+        """Return the next received bytes."""
+        data = await asyncio.wait_for(self._reader.read(256), TCP_READ_TIMEOUT)
+        if not data:
+            raise ConnectionError("Connection closed by the converter")
+        return data
+
+    async def _disconnect(self) -> None:
+        """Close the TCP connection."""
+        if self._writer:
+            self._writer.close()
+            with contextlib.suppress(OSError):
+                await self._writer.wait_closed()
+        self._reader = self._writer = None
 
 
 def format_address(address: bytes) -> str:
@@ -342,6 +446,7 @@ class TigoCoordinator(DataUpdateCoordinator):
         self.optimizer_data: dict[int, dict[str, Any]] = {}  # node ID -> report
         self.last_report: dict[int, float] = {}  # node ID -> monotonic time
         self.idle_nodes: set[int] = set()
+        self.connected = False
         self.update_interval_seconds: int = entry.options.get(
             CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
         )
@@ -446,6 +551,12 @@ class TigoCoordinator(DataUpdateCoordinator):
         return node_id in self.idle_nodes
 
     @callback
+    def _on_connection(self, connected: bool) -> None:
+        """Mark the entities unavailable while the bus cannot be read."""
+        self.connected = connected
+        self.async_update_listeners()
+
+    @callback
     def _on_address(self, node_id: int, address: bytes) -> None:
         if not address.startswith(ADDRESS_PREFIX):
             _LOGGER.debug(
@@ -484,10 +595,14 @@ class TigoCoordinator(DataUpdateCoordinator):
                 self.entry.data[CONF_PORT],
                 self._on_data,
                 self._on_address,
+                self._on_connection,
             )
         else:
             self.reader = TappipeSerialReader(
-                self.entry.data[CONF_SERIAL_PORT], self._on_data, self._on_address
+                self.entry.data[CONF_SERIAL_PORT],
+                self._on_data,
+                self._on_address,
+                self._on_connection,
             )
         await self.reader.start()
         self.entry.async_on_unload(
@@ -646,8 +761,10 @@ class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Return if a power report was received."""
-        return super().available and self._data is not None
+        """Return if the bus is read and a power report was received."""
+        return (
+            super().available and self.coordinator.connected and self._data is not None
+        )
 
     @property
     def native_value(self) -> StateType:

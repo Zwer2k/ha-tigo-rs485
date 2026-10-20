@@ -16,5 +16,5 @@
     "tappipe==0.0.5",
     "pyserial==3.5"
   ],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
