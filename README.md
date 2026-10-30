@@ -120,6 +120,25 @@ logger:
     custom_components.tigo_rs485: debug
 ```
 
+## Changelog
+
+### 1.0.2 (2026-10-30)
+
+- Removed `pyserial` from the requirements. It is already included in Home Assistant, and listing it made the hassfest validation fail.
+
+### 1.0.1 (2026-10-20)
+
+- When the connection to the adapter or converter is lost, the integration connects again on its own. It waits 5 seconds and doubles the wait up to 60 seconds. Before, only a reload of the integration helped, for example after `ser2net` or the Raspberry Pi restarted ([#1](https://github.com/Zwer2k/ha-tigo-rs485/issues/1)).
+- A TCP connection that receives no data for 60 seconds is opened again. This covers converters that restart without closing the connection.
+- Entities are unavailable while the bus cannot be read.
+
+### 1.0.0 (2026-10-14)
+
+- First release.
+- Optional update interval of 10 seconds to 10 minutes, with the reports averaged over that time. The default is to write every report.
+- Optimizers that do not report for 2 minutes show `0` for voltage, current and power, and unknown for the other sensors.
+- The options dialog also opens before any optimizer has reported.
+
 ## Credits
 
 - Frames are decoded with [tappipe](https://github.com/kicomoco/tap-pipe) (GPLv3). This integration works around some of its bugs.
