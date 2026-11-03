@@ -64,5 +64,36 @@
         "600": "10 Minuten"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "voltage_in": {
+        "name": "Eingangsspannung"
+      },
+      "voltage_out": {
+        "name": "Ausgangsspannung"
+      },
+      "current": {
+        "name": "Eingangsstrom"
+      },
+      "power": {
+        "name": "Leistung"
+      },
+      "temperature": {
+        "name": "Temperatur"
+      },
+      "pwm": {
+        "name": "PWM"
+      },
+      "rssi": {
+        "name": "RSSI"
+      },
+      "energy_today": {
+        "name": "Energie heute"
+      },
+      "energy_total": {
+        "name": "Energie gesamt"
+      }
+    }
   }
 }

@@ -153,6 +153,7 @@ logger:
 - Daily and total energy for each labeled optimizer.
 - Power and energy for each string and for the whole installation. The strings are assigned in a second step of the options, suggested from the labels (for example `A` for `A1`).
 - Download of diagnostics.
+- Translated sensor names (English, German), shown with the device name, for example `Tigo Optimizer A1 Voltage in` instead of `Panel A1 voltage_in`. The entity IDs stay `sensor.panel_<label>_<key>`, also on newer Home Assistant versions that would otherwise add the device name to them.
 - The update interval averages the values weighted by time instead of the plain mean of the reports.
 - The entities of all labeled optimizers are created right away, not only after the optimizer reported. The energy is therefore shown also after a restart at night.
 

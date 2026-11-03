@@ -45,7 +45,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     CoordinatorEntity,
 )
-from homeassistant.util import dt as dt_util
+from homeassistant.util import dt as dt_util, slugify
 from .barcode import barcode
 from .const import (
     CONF_LABELS,
@@ -171,6 +171,7 @@ def _rounded(key: str, digits: int) -> Callable[[dict[str, Any]], float | None]:
 OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     TigoSensorEntityDescription(
         key="voltage_in",
+        translation_key="voltage_in",
         idle_value=0,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -180,6 +181,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="voltage_out",
+        translation_key="voltage_out",
         idle_value=0,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -189,6 +191,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="current",
+        translation_key="current",
         idle_value=0,
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
@@ -198,6 +201,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="power",
+        translation_key="power",
         idle_value=0,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -207,6 +211,7 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="temperature",
+        translation_key="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -215,12 +220,14 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
     ),
     TigoSensorEntityDescription(
         key="pwm",
+        translation_key="pwm",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:numeric",
         value_fn=lambda data: data.get("duty"),
     ),
     TigoSensorEntityDescription(
         key="rssi",
+        translation_key="rssi",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
@@ -241,6 +248,7 @@ class TigoTotalSensorEntityDescription(SensorEntityDescription):
 ENERGY_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
     TigoTotalSensorEntityDescription(
         key="energy_today",
+        translation_key="energy_today",
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
@@ -251,6 +259,7 @@ ENERGY_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
     ),
     TigoTotalSensorEntityDescription(
         key="energy_total",
+        translation_key="energy_total",
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
@@ -264,6 +273,7 @@ ENERGY_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
 GROUP_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
     TigoTotalSensorEntityDescription(
         key="power",
+        translation_key="power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -679,7 +689,7 @@ class TigoCoordinator(DataUpdateCoordinator):
         for string in sorted(strings - {None}):
             names[string_key(string)] = f"Tigo String {string}"
         for label in self.labels.values():
-            names[panel_key(label)] = f"Panel {label}"
+            names[panel_key(label)] = f"Tigo Optimizer {label}"
         return names
 
     @callback
@@ -834,6 +844,16 @@ def _unique_id(entry: ConfigEntry, label: str, key: str) -> str:
     return f"{entry.entry_id}_{label}_{key}"
 
 
+def _entity_id(label: str, key: str) -> str:
+    """Return the entity ID of an optimizer sensor.
+
+    Suggested explicitly, as the device name "Tigo Optimizer <label>" would
+    lead to other IDs than home-assistant-tigo, whose long-term statistics
+    can so be taken over.
+    """
+    return f"sensor.{slugify(f'panel {label} {key}')}"
+
+
 def _device_identifier(entry: ConfigEntry, label: str) -> tuple[str, str]:
     """Return the device identifier of a labeled optimizer."""
     return (DOMAIN, f"{entry.entry_id}_{label}")
@@ -884,7 +904,7 @@ def _create_entities(coordinator: TigoCoordinator) -> list[SensorEntity]:
                     coordinator,
                     key,
                     description,
-                    name=f"{name} {description.key}",
+                    entity_id=_entity_id(label, description.key),
                     unique_id=_unique_id(entry, label, description.key),
                     device_info=DeviceInfo(
                         identifiers={_device_identifier(entry, label)}
@@ -898,7 +918,6 @@ def _create_entities(coordinator: TigoCoordinator) -> list[SensorEntity]:
                 coordinator,
                 key,
                 description,
-                name=f"{name} {description.key}",
                 unique_id=f"{entry.entry_id}_group_{key}_{description.key}",
                 device_info=DeviceInfo(
                     identifiers={_group_identifier(entry, key)},
@@ -918,8 +937,7 @@ async def async_setup_entry(
     """Set up Tigo RS485 sensors from a config entry."""
     coordinator = TigoCoordinator(hass, entry)
     # Created for all labels right away, so the energy is shown also before
-    # the optimizers report, e.g. after a restart at night. The entity IDs
-    # match home-assistant-tigo (sensor.panel_<label>_<key>)
+    # the optimizers report, e.g. after a restart at night
     entities = _create_entities(coordinator)
     _async_remove_stale(hass, entry, entities)
     await coordinator.async_start()
@@ -948,6 +966,7 @@ async def async_setup_entry(
 class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
     """Sensor of a single Tigo optimizer."""
 
+    _attr_has_entity_name = True
     entity_description: TigoSensorEntityDescription
 
     def __init__(
@@ -961,9 +980,7 @@ class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
         self.entity_description = description
         self._label = label
         entry = coordinator.entry
-        # Same naming as home-assistant-tigo, the device name stays distinct
-        # to avoid conflicts with its "Panel <label>" devices
-        self._attr_name = f"Panel {label} {description.key}"
+        self.entity_id = _entity_id(label, description.key)
         self._attr_unique_id = _unique_id(entry, label, description.key)
         self._attr_device_info = self._device_info()
 
@@ -1022,6 +1039,7 @@ class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
 class TigoTotalSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
     """Power or energy of an optimizer, a string or the installation."""
 
+    _attr_has_entity_name = True
     entity_description: TigoTotalSensorEntityDescription
 
     def __init__(
@@ -1030,7 +1048,7 @@ class TigoTotalSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
         key: str,
         description: TigoTotalSensorEntityDescription,
         *,
-        name: str,
+        entity_id: str | None = None,
         unique_id: str,
         device_info: DeviceInfo,
     ) -> None:
@@ -1038,7 +1056,8 @@ class TigoTotalSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._key = key
-        self._attr_name = name
+        if entity_id is not None:
+            self.entity_id = entity_id
         self._attr_unique_id = unique_id
         self._attr_device_info = device_info
 
