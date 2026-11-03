@@ -33,6 +33,10 @@
         "data_description": {
           "update_interval": "The optimizers report every few seconds. With a longer interval, the values are averaged over that time and written once, which reduces the writes to the database."
         }
+      },
+      "strings": {
+        "title": "Strings",
+        "description": "Enter the string of each optimizer, for example `A`. Optimizers with the same string are summed up in a device `Tigo String <name>`. Leave the field empty for optimizers that do not belong to a string. The suggestions are taken from the labels."
       }
     },
     "error": {

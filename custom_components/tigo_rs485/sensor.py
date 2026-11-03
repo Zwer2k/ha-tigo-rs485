@@ -3,10 +3,12 @@
 import logging
 import asyncio
 import contextlib
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
+from itertools import pairwise
 import struct
 from typing import Any
 
@@ -24,6 +26,7 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
+    UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
 )
@@ -34,17 +37,23 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     CoordinatorEntity,
 )
+from homeassistant.util import dt as dt_util
 from .barcode import barcode
 from .const import (
     CONF_LABELS,
+    CONF_STRINGS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    guess_string,
 )
 
 CONF_CONNECTION_TYPE = "connection_type"
@@ -78,6 +87,10 @@ RECONNECT_DELAY_MAX = 60
 # data is most likely dead (for example after the converter rebooted
 # without closing the connection) and is opened again
 TCP_READ_TIMEOUT = 60
+# The energy changes with every report, so it is saved at most once a minute
+ENERGY_SAVE_DELAY = 60
+# Energy key of all optimizers on the bus, labeled or not
+INSTALLATION = "installation"
 
 
 def _check_crc(self) -> bool:
@@ -112,16 +125,40 @@ def _power(data: dict[str, Any]) -> float | None:
     return round(data["power"], 2)
 
 
-def _average(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the latest report with the measured values averaged."""
-    result = dict(reports[-1])
+def _average(reports: list[tuple[float, dict[str, Any]]]) -> dict[str, Any]:
+    """Return the latest report with the measured values averaged over time.
+
+    The reports are monotonic times with their values. Like the energy, the
+    values are integrated with the trapezoidal rule, so the averaged power
+    times the interval matches the energy, also when reports are missing.
+    """
+    result = dict(reports[-1][1])
     for key in AVERAGED_KEYS + AVERAGED_RAW_KEYS:
-        values = [value for report in reports if (value := report.get(key)) is not None]
-        if not values:
-            continue
-        mean = sum(values) / len(values)
+        area = duration = 0.0
+        for (start, first), (end, second) in pairwise(reports):
+            if (
+                (value_start := first.get(key)) is None
+                or (value_end := second.get(key)) is None
+                or end - start > IDLE_TIMEOUT.total_seconds()
+            ):
+                continue
+            area += (value_start + value_end) / 2 * (end - start)
+            duration += end - start
+        if not duration:
+            continue  # Keep the latest value
+        mean = area / duration
         result[key] = round(mean) if key in AVERAGED_RAW_KEYS else mean
     return result
+
+
+def panel_key(label: str) -> str:
+    """Return the energy key of a labeled optimizer."""
+    return f"panel:{label}"
+
+
+def string_key(string: str) -> str:
+    """Return the energy key of a string."""
+    return f"string:{string}"
 
 
 def _rounded(key: str, digits: int) -> Callable[[dict[str, Any]], float | None]:
@@ -192,6 +229,52 @@ OPTIMIZER_SENSORS: tuple[TigoSensorEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class TigoTotalSensorEntityDescription(SensorEntityDescription):
+    """Describes a sensor that sums up optimizers, keyed by an energy key."""
+
+    value_fn: Callable[["TigoCoordinator", str], StateType]
+    # Only measured while the bus is read, energy is known from the store
+    needs_connection: bool = False
+
+
+ENERGY_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
+    TigoTotalSensorEntityDescription(
+        key="energy_today",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=2,
+        value_fn=lambda coordinator, key: round(
+            coordinator.energy_today.get(key, 0) / 1000, 3
+        ),
+    ),
+    TigoTotalSensorEntityDescription(
+        key="energy_total",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=2,
+        value_fn=lambda coordinator, key: round(
+            coordinator.energy_total.get(key, 0) / 1000, 3
+        ),
+    ),
+)
+
+GROUP_SENSORS: tuple[TigoTotalSensorEntityDescription, ...] = (
+    TigoTotalSensorEntityDescription(
+        key="power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        suggested_display_precision=0,
+        needs_connection=True,
+        value_fn=lambda coordinator, key: round(coordinator.group_power(key), 1),
+    ),
+    *ENERGY_SENSORS,
+)
+
+
 class TappipeReaderBase:
     """Abstract base for Tappipe readers (serial or TCP)."""
 
@@ -203,6 +286,8 @@ class TappipeReaderBase:
         self._running = False
         self._task = None
         self._connected = False
+        # Received frames and reports, shown in the diagnostics
+        self.stats: Counter[str] = Counter()
 
     async def start(self):
         self._running = True
@@ -304,12 +389,15 @@ class TappipeReaderBase:
         """Decode a single frame and forward the contained reports."""
         # Gateway responses start with 7e 07 without the ff preamble that
         # tappipe expects, so always add it before handing the frame over
+        self.stats["frames"] += 1
         fr = tappipe.frame(b"\xff" + raw)
         if fr.getType() is None:
+            self.stats["unknown_frames"] += 1
             return
         try:
             fr.process()
         except struct.error:
+            self.stats["truncated_frames"] += 1
             _LOGGER.debug("Ignoring truncated frame: %s", raw.hex(" "))
             return
         if not (fr.processor and hasattr(fr.processor, "decoded")):
@@ -319,6 +407,7 @@ class TappipeReaderBase:
             fr.processor.processor, tappipe.node_table
         ):
             table = fr.processor.processor.decoded["table"]
+            self.stats["node_tables"] += 1
             _LOGGER.debug("Node table received with %s entries", len(table))
             for node_id, address in table.items():
                 self._address_callback(node_id, address)
@@ -329,9 +418,11 @@ class TappipeReaderBase:
                 # 7 byte packet header follow short address, node ID, next
                 # hop and 2 unknown bytes, then the long address (see taptap)
                 address = bytes(pkt.bytes[15:23])
+                self.stats["topology_reports"] += 1
                 if len(address) == 8:
                     self._address_callback(pkt.decoded["nodeid"], address)
             elif pkt.getType() == tappipe.pvtype.POWER_REPORT.value:
+                self.stats["power_reports"] += 1
                 if pkt.decoded["nodeid"] is not None:
                     _LOGGER.debug("Power report: %s", pkt.decoded)
                     self._data_callback(pkt.decoded["nodeid"], pkt.decoded)
@@ -421,6 +512,11 @@ class TappipeTCPReader(TappipeReaderBase):
         self._reader = self._writer = None
 
 
+def _today() -> str:
+    """Return the local date, the daily energy starts at midnight."""
+    return dt_util.now().date().isoformat()
+
+
 def format_address(address: bytes) -> str:
     """Return the long address of an optimizer as text."""
     return address.hex(":").upper()
@@ -439,6 +535,7 @@ class TigoCoordinator(DataUpdateCoordinator):
         )
         self.entry = entry
         self.labels: dict[str, str] = entry.options.get(CONF_LABELS, {})
+        self.strings: dict[str, str] | None = entry.options.get(CONF_STRINGS)
         self.addresses: dict[int, str] = {}  # node ID -> long address
         # Wrongly decoded addresses of older versions -> node ID, so labels
         # assigned to them keep working until the options are saved again
@@ -450,9 +547,17 @@ class TigoCoordinator(DataUpdateCoordinator):
         self.update_interval_seconds: int = entry.options.get(
             CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
         )
-        # Reports received since the last write, node ID -> reports
-        self._pending: dict[int, list[dict[str, Any]]] = {}
-        self.reader = None
+        # Reports received since the last write, node ID -> times and reports
+        self._pending: dict[int, list[tuple[float, dict[str, Any]]]] = {}
+        # Last report before the current interval, where the average starts
+        self._interval_start: dict[int, tuple[float, dict[str, Any]]] = {}
+        # Energy in Wh by energy key, see energy_keys
+        self.energy_today: dict[str, float] = {}
+        self.energy_total: dict[str, float] = {}
+        self._energy_date = _today()
+        # node ID -> monotonic time and power of the last report
+        self._last_power: dict[int, tuple[float, float]] = {}
+        self.reader: TappipeReaderBase | None = None
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
@@ -490,6 +595,31 @@ class TigoCoordinator(DataUpdateCoordinator):
                 return label
         return None
 
+    def string_for(self, label: str | None) -> str | None:
+        """Return the string a labeled optimizer belongs to."""
+        if label is None:
+            return None
+        if self.strings is None:
+            return guess_string(label)
+        return self.strings.get(label)
+
+    def energy_keys(self, node_id: int) -> list[str]:
+        """Return the energy keys an optimizer adds its energy to."""
+        keys = [INSTALLATION]
+        if (label := self.label_for(node_id)) is not None:
+            keys.append(panel_key(label))
+            if (string := self.string_for(label)) is not None:
+                keys.append(string_key(string))
+        return keys
+
+    def group_power(self, key: str) -> float:
+        """Return the power of all reporting optimizers of an energy key."""
+        return sum(
+            data.get("power") or 0
+            for node_id, data in self.optimizer_data.items()
+            if not self.is_idle(node_id) and key in self.energy_keys(node_id)
+        )
+
     def node_for(self, label: str) -> int | None:
         """Return the current node ID of the optimizer with the given label."""
         for node_id in self.optimizer_data:
@@ -502,13 +632,55 @@ class TigoCoordinator(DataUpdateCoordinator):
         # Power is calculated per report, so the average stays correct
         if data.get("vin") is not None and data.get("ampsin") is not None:
             data = {**data, "power": data["vin"] * data["ampsin"]}
-        self.last_report[node_id] = self.hass.loop.time()
+        now = self.hass.loop.time()
+        self._add_energy(node_id, data.get("power"), now)
+        self.last_report[node_id] = now
         # Write every report, or the first one so new optimizers show up
         if not self.update_interval_seconds or node_id not in self.optimizer_data:
+            self._interval_start[node_id] = (now, data)
             self._set_node_data(node_id, data)
             self.async_set_updated_data(self.optimizer_data)
             return
-        self._pending.setdefault(node_id, []).append(data)
+        self._pending.setdefault(node_id, []).append((now, data))
+
+    @callback
+    def _add_energy(self, node_id: int, power: float | None, now: float) -> None:
+        """Add the energy since the previous report of an optimizer.
+
+        Integrated from every report, so the update interval does not
+        change the result.
+        """
+        if power is None:
+            return
+        previous = self._last_power.get(node_id)
+        self._last_power[node_id] = (now, power)
+        # The power during a longer gap, e.g. the night or a lost
+        # connection, is unknown
+        if previous is None or now - previous[0] > IDLE_TIMEOUT.total_seconds():
+            return
+        energy = (previous[1] + power) / 2 * (now - previous[0]) / 3600
+        for key in self.energy_keys(node_id):
+            self.energy_today[key] = self.energy_today.get(key, 0) + energy
+            self.energy_total[key] = self.energy_total.get(key, 0) + energy
+        self._store.async_delay_save(self._data_to_store, ENERGY_SAVE_DELAY)
+
+    @callback
+    def _reset_energy_today(self, _now: Any = None) -> None:
+        """Start counting the energy of the new day."""
+        self.energy_today = {}
+        self._energy_date = _today()
+        self._store.async_delay_save(self._data_to_store, ENERGY_SAVE_DELAY)
+        self.async_update_listeners()
+
+    def energy_key_names(self) -> dict[str, str]:
+        """Return the energy keys of the current labels with their names."""
+        names = {INSTALLATION: "Tigo Installation"}
+        strings = {self.string_for(label) for label in self.labels.values()}
+        for string in sorted(strings - {None}):
+            names[string_key(string)] = f"Tigo String {string}"
+        for label in self.labels.values():
+            names[panel_key(label)] = f"Panel {label}"
+        return names
 
     @callback
     def _set_node_data(self, node_id: int, data: dict[str, Any]) -> None:
@@ -525,6 +697,9 @@ class TigoCoordinator(DataUpdateCoordinator):
             return
         pending, self._pending = self._pending, {}
         for node_id, reports in pending.items():
+            if (start := self._interval_start.get(node_id)) is not None:
+                reports.insert(0, start)
+            self._interval_start[node_id] = reports[-1]
             self._set_node_data(node_id, _average(reports))
         self.async_set_updated_data(self.optimizer_data)
 
@@ -577,7 +752,14 @@ class TigoCoordinator(DataUpdateCoordinator):
 
     @callback
     def _data_to_store(self) -> dict[str, Any]:
-        return {"addresses": {str(k): v for k, v in self.addresses.items()}}
+        return {
+            "addresses": {str(k): v for k, v in self.addresses.items()},
+            "energy": {
+                "date": self._energy_date,
+                "today": self.energy_today,
+                "total": self.energy_total,
+            },
+        }
 
     async def async_start(self) -> None:
         """Load the known addresses and start reading from the bus."""
@@ -588,6 +770,20 @@ class TigoCoordinator(DataUpdateCoordinator):
                 else:
                     # Stored by an older version that decoded addresses wrong
                     self.legacy_keys[text] = int(key)
+            energy = stored.get("energy", {})
+            # Energy of removed labels and strings is dropped with their entities
+            keys = self.energy_key_names()
+            self.energy_total = {
+                key: value
+                for key, value in energy.get("total", {}).items()
+                if key in keys
+            }
+            if energy.get("date") == self._energy_date:
+                self.energy_today = {
+                    key: value
+                    for key, value in energy.get("today", {}).items()
+                    if key in keys
+                }
         typ = self.entry.data.get(CONF_CONNECTION_TYPE, "serial")
         if typ == "tcp":
             self.reader = TappipeTCPReader(
@@ -607,6 +803,11 @@ class TigoCoordinator(DataUpdateCoordinator):
         await self.reader.start()
         self.entry.async_on_unload(
             async_track_time_interval(self.hass, self._check_idle, IDLE_CHECK_INTERVAL)
+        )
+        self.entry.async_on_unload(
+            async_track_time_change(
+                self.hass, self._reset_energy_today, hour=0, minute=0, second=0
+            )
         )
         if self.update_interval_seconds:
             self.entry.async_on_unload(
@@ -638,22 +839,27 @@ def _device_identifier(entry: ConfigEntry, label: str) -> tuple[str, str]:
     return (DOMAIN, f"{entry.entry_id}_{label}")
 
 
+def _group_identifier(entry: ConfigEntry, key: str) -> tuple[str, str]:
+    """Return the device identifier of the installation or a string."""
+    return (DOMAIN, f"{entry.entry_id}_group_{key}")
+
+
 @callback
 def _async_remove_stale(
-    hass: HomeAssistant, entry: ConfigEntry, labels: dict[str, str]
+    hass: HomeAssistant, entry: ConfigEntry, entities: list[SensorEntity]
 ) -> None:
     """Remove entities and devices of unlabeled or relabeled optimizers."""
-    expected = {
-        _unique_id(entry, label, description.key)
-        for label in labels.values()
-        for description in OPTIMIZER_SENSORS
-    }
+    expected = {entity.unique_id for entity in entities}
     ent_reg = er.async_get(hass)
     for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
         if entity.unique_id not in expected:
             ent_reg.async_remove(entity.entity_id)
 
-    expected_devices = {_device_identifier(entry, label) for label in labels.values()}
+    expected_devices = {
+        identifier
+        for entity in entities
+        for identifier in entity.device_info["identifiers"]
+    }
     dev_reg = dr.async_get(hass)
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
         if not device.identifiers & expected_devices:
@@ -662,45 +868,80 @@ def _async_remove_stale(
             )
 
 
+def _create_entities(coordinator: TigoCoordinator) -> list[SensorEntity]:
+    """Return the entities of the labeled optimizers, strings and installation."""
+    entry = coordinator.entry
+    entities: list[SensorEntity] = []
+    for key, name in coordinator.energy_key_names().items():
+        if key.startswith("panel:"):
+            label = key.removeprefix("panel:")
+            entities.extend(
+                TigoOptimizerSensor(coordinator, label, description)
+                for description in OPTIMIZER_SENSORS
+            )
+            entities.extend(
+                TigoTotalSensor(
+                    coordinator,
+                    key,
+                    description,
+                    name=f"{name} {description.key}",
+                    unique_id=_unique_id(entry, label, description.key),
+                    device_info=DeviceInfo(
+                        identifiers={_device_identifier(entry, label)}
+                    ),
+                )
+                for description in ENERGY_SENSORS
+            )
+            continue
+        entities.extend(
+            TigoTotalSensor(
+                coordinator,
+                key,
+                description,
+                name=f"{name} {description.key}",
+                unique_id=f"{entry.entry_id}_group_{key}_{description.key}",
+                device_info=DeviceInfo(
+                    identifiers={_group_identifier(entry, key)},
+                    name=name,
+                    manufacturer="Tigo",
+                    model="Installation" if key == INSTALLATION else "String",
+                ),
+            )
+            for description in GROUP_SENSORS
+        )
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up Tigo RS485 sensors from a config entry."""
     coordinator = TigoCoordinator(hass, entry)
-    _async_remove_stale(hass, entry, coordinator.labels)
+    # Created for all labels right away, so the energy is shown also before
+    # the optimizers report, e.g. after a restart at night. The entity IDs
+    # match home-assistant-tigo (sensor.panel_<label>_<key>)
+    entities = _create_entities(coordinator)
+    _async_remove_stale(hass, entry, entities)
     await coordinator.async_start()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    async_add_entities(entities)
 
-    # Entities are only created for labeled optimizers, so the entity IDs
-    # match home-assistant-tigo (sensor.panel_<label>_<key>) right away
-    known_labels: set[str] = set()
     reported_nodes: set[int] = set()
 
     @callback
-    def _check_new_optimizers() -> None:
-        """Add entities for newly discovered optimizers."""
-        new_entities = []
+    def _log_unlabeled_optimizers() -> None:
+        """Log newly discovered optimizers that have no label yet."""
         for node_id in coordinator.optimizer_data:
-            if (label := coordinator.label_for(node_id)) is None:
-                if node_id not in reported_nodes:
-                    reported_nodes.add(node_id)
-                    _LOGGER.info(
-                        "Optimizer %s found, assign a label in the integration "
-                        "options to add it",
-                        coordinator.label_key(node_id),
-                    )
+            if node_id in reported_nodes or coordinator.label_for(node_id):
                 continue
-            if label in known_labels:
-                continue
-            known_labels.add(label)
-            new_entities.extend(
-                TigoOptimizerSensor(coordinator, label, description)
-                for description in OPTIMIZER_SENSORS
+            reported_nodes.add(node_id)
+            _LOGGER.info(
+                "Optimizer %s found, assign a label in the integration "
+                "options to add it",
+                coordinator.label_key(node_id),
             )
-        if new_entities:
-            async_add_entities(new_entities)
 
-    entry.async_on_unload(coordinator.async_add_listener(_check_new_optimizers))
+    entry.async_on_unload(coordinator.async_add_listener(_log_unlabeled_optimizers))
     entry.async_on_unload(coordinator.async_stop)
 
 
@@ -776,3 +1017,39 @@ class TigoOptimizerSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
         if (data := self.coordinator.optimizer_data.get(node_id)) is None:
             return None
         return self.entity_description.value_fn(data)
+
+
+class TigoTotalSensor(CoordinatorEntity[TigoCoordinator], SensorEntity):
+    """Power or energy of an optimizer, a string or the installation."""
+
+    entity_description: TigoTotalSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: TigoCoordinator,
+        key: str,
+        description: TigoTotalSensorEntityDescription,
+        *,
+        name: str,
+        unique_id: str,
+        device_info: DeviceInfo,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._key = key
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_device_info = device_info
+
+    @property
+    def available(self) -> bool:
+        """Return if the value is known."""
+        if self.entity_description.needs_connection:
+            return super().available and self.coordinator.connected
+        return super().available
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the value of this sensor."""
+        return self.entity_description.value_fn(self.coordinator, self._key)
