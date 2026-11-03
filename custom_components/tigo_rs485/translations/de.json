@@ -36,7 +36,7 @@
       },
       "strings": {
         "title": "Strings",
-        "description": "Gib für jeden Optimierer den String ein, z. B. `A`. Optimierer mit demselben String werden im Gerät `Tigo String <Name>` zusammengefasst. Lass das Feld leer, wenn ein Optimierer zu keinem String gehören soll. Die Vorschläge stammen aus den Labels."
+        "description": "Gib für jeden Optimierer den String ein, z. B. `A`. Optimierer mit demselben String werden in einem Gerät mit dem Namen des Strings zusammengefasst, z. B. `Tigo String A`. Lass das Feld leer, wenn ein Optimierer zu keinem String gehören soll. Die Vorschläge stammen aus den Labels."
       }
     },
     "error": {

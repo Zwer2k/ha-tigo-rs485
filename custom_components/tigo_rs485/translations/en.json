@@ -36,7 +36,7 @@
       },
       "strings": {
         "title": "Strings",
-        "description": "Enter the string of each optimizer, for example `A`. Optimizers with the same string are summed up in a device `Tigo String <name>`. Leave the field empty for optimizers that do not belong to a string. The suggestions are taken from the labels."
+        "description": "Enter the string of each optimizer, for example `A`. Optimizers with the same string are summed up in a device named after the string, for example `Tigo String A`. Leave the field empty for optimizers that do not belong to a string. The suggestions are taken from the labels."
       }
     },
     "error": {
