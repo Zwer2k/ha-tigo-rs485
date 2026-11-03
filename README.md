@@ -148,6 +148,10 @@ logger:
 
 ## Changelog
 
+### 1.1.1 (2026-11-03)
+
+- Fixed the description of the strings step in the options, which made the hassfest validation fail.
+
 ### 1.1.0 (2026-11-03)
 
 - Daily and total energy for each labeled optimizer.
