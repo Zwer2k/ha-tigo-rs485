@@ -148,7 +148,7 @@ logger:
 
 ## Changelog
 
-### 1.1.0 (unreleased)
+### 1.1.0 (2026-11-03)
 
 - Daily and total energy for each labeled optimizer.
 - Power and energy for each string and for the whole installation. The strings are assigned in a second step of the options, suggested from the labels (for example `A` for `A1`).
