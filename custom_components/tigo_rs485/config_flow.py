@@ -1,6 +1,7 @@
 """Config flow for Tigo RS485 integration."""
 from __future__ import annotations
 import os
+from typing import Any
 import voluptuous as vol
 import serial.tools.list_ports
 from homeassistant import config_entries
@@ -16,10 +17,12 @@ from homeassistant.helpers.selector import (
 )
 from .const import (
     CONF_LABELS,
+    CONF_STRINGS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     UPDATE_INTERVALS,
+    guess_string,
 )
 
 BY_ID_DIR = "/dev/serial/by-id"
@@ -146,7 +149,11 @@ class TigoRS485ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class TigoRS485OptionsFlow(config_entries.OptionsFlow):
-    """Assign panel labels to the discovered optimizers."""
+    """Assign panel labels to the discovered optimizers and their strings."""
+
+    def __init__(self) -> None:
+        """Initialize the options flow."""
+        self._options: dict[str, Any] = {}
 
     async def async_step_init(self, user_input=None):
         """Show the update interval and one label field per known optimizer."""
@@ -185,12 +192,15 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
             if len(set(new_labels.values())) != len(new_labels):
                 errors["base"] = "duplicate_label"
             else:
-                return self.async_create_entry(
-                    data={
-                        CONF_LABELS: new_labels,
-                        CONF_UPDATE_INTERVAL: update_interval,
-                    }
-                )
+                self._options = {
+                    CONF_LABELS: new_labels,
+                    CONF_UPDATE_INTERVAL: update_interval,
+                }
+                if not new_labels:
+                    return self.async_create_entry(
+                        data={**self._options, CONF_STRINGS: {}}
+                    )
+                return await self.async_step_strings()
             labels = new_labels
 
         # List what is known about each optimizer to help identify it
@@ -235,3 +245,34 @@ class TigoRS485OptionsFlow(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={"optimizers": "\n".join(lines)},
         )
+
+    async def async_step_strings(self, user_input=None):
+        """Assign each labeled optimizer to a string."""
+        labels = sorted(self._options[CONF_LABELS].values())
+        if user_input is not None:
+            strings = {
+                label: string
+                for label in labels
+                if (string := user_input.get(label, "").strip())
+            }
+            return self.async_create_entry(data={**self._options, CONF_STRINGS: strings})
+
+        old_labels = set(self.config_entry.options.get(CONF_LABELS, {}).values())
+        old_strings: dict[str, str] | None = self.config_entry.options.get(CONF_STRINGS)
+        suggested: dict[str, str] = {}
+        for label in labels:
+            # Kept labels show their saved string, even when it was cleared
+            if old_strings is not None and label in old_labels:
+                suggested[label] = old_strings.get(label, "")
+            else:
+                suggested[label] = guess_string(label) or ""
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    label, description={"suggested_value": suggested[label]}
+                ): str
+                for label in labels
+            }
+        )
+        return self.async_show_form(step_id="strings", data_schema=schema)

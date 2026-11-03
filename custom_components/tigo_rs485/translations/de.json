@@ -33,6 +33,10 @@
         "data_description": {
           "update_interval": "Die Optimierer melden sich alle paar Sekunden. Bei einem längeren Intervall werden die Werte über diese Zeit gemittelt und nur einmal geschrieben. Das reduziert die Schreibvorgänge in die Datenbank."
         }
+      },
+      "strings": {
+        "title": "Strings",
+        "description": "Gib für jeden Optimierer den String ein, z. B. `A`. Optimierer mit demselben String werden im Gerät `Tigo String <Name>` zusammengefasst. Lass das Feld leer, wenn ein Optimierer zu keinem String gehören soll. Die Vorschläge stammen aus den Labels."
       }
     },
     "error": {
