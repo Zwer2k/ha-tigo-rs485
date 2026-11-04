@@ -148,7 +148,7 @@ logger:
 
 ## Changelog
 
-### 1.1.2 (unreleased)
+### 1.1.2 (2026-11-04)
 
 - The setup opens the serial port or the connection to the converter briefly and shows an error if that fails. Before, a wrong port, host or port number was accepted without notice.
 
