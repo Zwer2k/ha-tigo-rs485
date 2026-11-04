@@ -148,6 +148,10 @@ logger:
 
 ## Changelog
 
+### 1.1.2 (unreleased)
+
+- The setup opens the serial port or the connection to the converter briefly and shows an error if that fails. Before, a wrong port, host or port number was accepted without notice.
+
 ### 1.1.1 (2026-11-03)
 
 - Fixed the description of the strings step in the options, which made the hassfest validation fail.

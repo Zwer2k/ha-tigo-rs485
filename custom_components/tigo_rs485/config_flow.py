@@ -1,8 +1,12 @@
 """Config flow for Tigo RS485 integration."""
 from __future__ import annotations
+import asyncio
+import contextlib
+import logging
 import os
 from typing import Any
 import voluptuous as vol
+import serial
 import serial.tools.list_ports
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PORT
@@ -25,8 +29,11 @@ from .const import (
     guess_string,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 BY_ID_DIR = "/dev/serial/by-id"
 DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
+CONNECT_TIMEOUT = 10
 
 
 def _list_serial_ports() -> list[SelectOptionDict]:
@@ -54,6 +61,28 @@ def _list_serial_ports() -> list[SelectOptionDict]:
     if not ports:
         ports = [{"value": DEFAULT_SERIAL_PORT, "label": DEFAULT_SERIAL_PORT}]
     return ports
+
+async def _async_test_connection(hass, user_input: dict[str, Any]) -> None:
+    """Open the TCP connection or serial port briefly, raise OSError if it fails.
+
+    No data is awaited, as the optimizers do not report at night.
+    """
+    if CONF_HOST in user_input:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(user_input[CONF_HOST], user_input[CONF_PORT]),
+            CONNECT_TIMEOUT,
+        )
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+        return
+
+    def _open_and_close() -> None:
+        # SerialException is an OSError
+        serial.Serial(user_input[CONF_SERIAL_PORT], baudrate=38400).close()
+
+    await hass.async_add_executor_job(_open_and_close)
+
 
 class TigoRS485ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Tigo RS485."""
@@ -92,47 +121,38 @@ class TigoRS485ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         connection_type = getattr(self, "connection_type", None)
         if user_input is not None:
-            # Test connection to tappipe hier (pseudo code)
+            if connection_type == "tcp":
+                unique = f"tigo_tcp_{user_input[CONF_HOST]}_{user_input[CONF_PORT]}"
+                title = f"Tigo RS485 TCP {user_input[CONF_HOST]}"
+                data = {
+                    CONF_CONNECTION_TYPE: connection_type,
+                    CONF_HOST: user_input[CONF_HOST],
+                    CONF_PORT: user_input[CONF_PORT],
+                }
+            else:
+                unique = f"tigo_serial_{user_input[CONF_SERIAL_PORT]}"
+                title = f"Tigo RS485 Serial {user_input[CONF_SERIAL_PORT]}"
+                data = {
+                    CONF_CONNECTION_TYPE: connection_type,
+                    CONF_SERIAL_PORT: user_input[CONF_SERIAL_PORT],
+                }
+            # Checked first, the configured port may be in use by this entry
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
             try:
-                if connection_type == "tcp":
-                    # from tappipe import TappipeClient
-                    # client = TappipeClient(user_input[CONF_HOST], user_input[CONF_PORT])
-                    # await client.async_connect()
-                    # await client.async_disconnect()
-                    pass
-                else:
-                    # from tappipe import TappipeSerial
-                    # client = TappipeSerial(user_input[CONF_SERIAL_PORT])
-                    # await client.async_connect()
-                    # await client.async_disconnect()
-                    pass
-            except Exception:
+                await _async_test_connection(self.hass, user_input)
+            except OSError as err:
+                _LOGGER.debug("Cannot connect to %s: %s", title, err)
                 errors["base"] = "cannot_connect"
             else:
-                # Unique ID je nach Typ
-                if connection_type == "tcp":
-                    unique = f"tigo_tcp_{user_input[CONF_HOST]}_{user_input[CONF_PORT]}"
-                    title = f"Tigo RS485 TCP {user_input[CONF_HOST]}"
-                    data = {
-                        CONF_CONNECTION_TYPE: connection_type,
-                        CONF_HOST: user_input[CONF_HOST],
-                        CONF_PORT: user_input[CONF_PORT],
-                    }
-                else:
-                    unique = f"tigo_serial_{user_input[CONF_SERIAL_PORT]}"
-                    title = f"Tigo RS485 Serial {user_input[CONF_SERIAL_PORT]}"
-                    data = {
-                        CONF_CONNECTION_TYPE: connection_type,
-                        CONF_SERIAL_PORT: user_input[CONF_SERIAL_PORT],
-                    }
-                await self.async_set_unique_id(unique)
-                self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=title, data=data)
 
         if connection_type == "tcp":
             data_schema = vol.Schema({
                 vol.Required(CONF_HOST): str,
-                vol.Required(CONF_PORT, default=502): int,
+                vol.Required(CONF_PORT, default=502): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=65535)
+                ),
             })
         else:
             ports = await self.hass.async_add_executor_job(_list_serial_ports)
