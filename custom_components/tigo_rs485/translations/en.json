@@ -20,6 +20,9 @@
     },
     "error": {
       "cannot_connect": "Failed to connect. Check your settings."
+    },
+    "abort": {
+      "already_configured": "This serial port or converter is already configured."
     }
   },
   "options": {

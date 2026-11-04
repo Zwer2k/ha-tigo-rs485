@@ -20,6 +20,9 @@
     },
     "error": {
       "cannot_connect": "Verbindung fehlgeschlagen. Bitte prüfe die Einstellungen."
+    },
+    "abort": {
+      "already_configured": "Diese serielle Schnittstelle bzw. dieser Wandler ist bereits eingerichtet."
     }
   },
   "options": {
